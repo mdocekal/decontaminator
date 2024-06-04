@@ -1,0 +1,2 @@
+{"id": 0, "content": "This is non contaminated text and it should remain the same after decontamination."}
+{"id": 1, "content": "somewhat contaminated plain text should be decontaminated."}

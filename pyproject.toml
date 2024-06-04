@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools", "wheel", "Cython"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decontaminator"
+dynamic = ["dependencies"]
+version = "0.0.1"
+requires-python = ">=3.10"
+authors = [
+  {name = "Martin Dočekal"},
+]
+description = "Tool for decontamination of training datasets"
+readme = "README.md"
+keywords = ["decontamination", "machine learning", "data"]
+
+[project.urls]
+Repository = "https://github.com/mdocekal/decontaminator"
+
+[project.scripts]
+decontaminator = "decontaminator.__main__:main"
+
+[tool.hatch.build]
+exclude = [
+  "/tests",
+]
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
