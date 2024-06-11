@@ -10,7 +10,7 @@ from pathlib import Path
 from shutil import rmtree
 from unittest import TestCase
 
-from decontaminator.__main__ import create_ngram_map, decontaminate
+from decontaminator.__main__ import create_ngram_map, decontaminate, search_contaminated
 from decontaminator.myjson import json_dumps
 
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -62,9 +62,10 @@ class TestBase(TestCase):
                 self.assertListEqual(gt_lines, res_lines)
 
 
-
 DATASET_FOR_MAP_CREATE_PATH = os.path.join(FIXTURES_PATH, "dataset_for_map_create.jsonl")
 CREATED_MAP_PATH = os.path.join(TMP_PATH, "created_map.db")
+
+
 class TestCreateNgramMap(TestBase):
 
     def test_create_ngram_map(self):
@@ -74,19 +75,21 @@ class TestCreateNgramMap(TestBase):
         with open(CREATED_MAP_PATH, "r") as f:
             db = json.load(f)
             self.assertEqual(len(db), 9)
-            self.assertEqual(db[json_dumps(["hello", "world"])], 2)
-            self.assertEqual(db[json_dumps(["world", "how"])], 1)
-            self.assertEqual(db[json_dumps(["how", "are"])], 1)
-            self.assertEqual(db[json_dumps(["are", "you"])], 1)
-            self.assertEqual(db[json_dumps(["i", "m"])], 1)
-            self.assertEqual(db[json_dumps(["m", "fine"])], 1)
-            self.assertEqual(db[json_dumps(["fine", "thank"])], 1)
-            self.assertEqual(db[json_dumps(["thank", "you"])], 1)
+            self.assertEqual(db[json_dumps(["hello", "world"])], [0, 1])
+            self.assertEqual(db[json_dumps(["world", "how"])], [1])
+            self.assertEqual(db[json_dumps(["how", "are"])], [1])
+            self.assertEqual(db[json_dumps(["are", "you"])], [1])
+            self.assertEqual(db[json_dumps(["i", "m"])], [2])
+            self.assertEqual(db[json_dumps(["m", "fine"])], [2])
+            self.assertEqual(db[json_dumps(["fine", "thank"])], [2])
+            self.assertEqual(db[json_dumps(["thank", "you"])], [2])
             self.assertEqual(db["metadata"], {
                 "n": 2,
                 "allow_shorter": False,
-                "format_str": "{content}"
+                "format_str": "{content}",
+                "samples": 3
             })
+
 
 DECONTAMINATE_MAP_PATH = os.path.join(FIXTURES_PATH, "decontaminate_map.json")
 DATASET_FOR_DECONTAMINATE_PATH = os.path.join(FIXTURES_PATH, "decontaminate.jsonl")
@@ -109,3 +112,24 @@ class TestDecontaminate(TestBase):
                       "content", window_size=25, removal_char_boundary=70, ignore_above=9, workers=1)
 
         self.compare_jsonl(DECONTAMINATED_COMMON_DATASET_PATH, DECONTAMINATED_OUTPUT_PATH)
+
+
+CONTAMINATED_SEARCH_MAP_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_map.json")
+CONTAMINATED_SEARCH_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_results.json")
+CONTAMINATED_SEARCH_RESULTS_COMMON_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_results_common.json")
+CONTAMINATED_SEARCH_OUTPUT_PATH = os.path.join(TMP_PATH, "contaminated_search_results.json")
+
+
+class TestSearchContaminated(TestBase):
+
+    def test_search_contaminated(self):
+        search_contaminated(DATASET_FOR_DECONTAMINATE_PATH, CONTAMINATED_SEARCH_MAP_PATH,
+                            CONTAMINATED_SEARCH_OUTPUT_PATH, "content", workers=1)
+
+        self.compare_jsonl(CONTAMINATED_SEARCH_RESULTS_PATH, CONTAMINATED_SEARCH_OUTPUT_PATH)
+
+    def test_search_contaminated_common(self):
+        search_contaminated(DATASET_FOR_DECONTAMINATE_PATH, CONTAMINATED_SEARCH_MAP_PATH,
+                            CONTAMINATED_SEARCH_OUTPUT_PATH, "content", ignore_above=2, workers=1)
+
+        self.compare_jsonl(CONTAMINATED_SEARCH_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_OUTPUT_PATH)

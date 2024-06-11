@@ -16,6 +16,7 @@ from typing import Optional, Iterable, Tuple
 
 import orjson
 from tqdm import tqdm
+from pathlib import Path
 from windpyutils.parallel.own_proc_pools import FunctorWorker, FunctorPool
 
 from decontaminator.cython.tokenizer import whitespace_tokenizer
@@ -40,13 +41,13 @@ def create_ngram_map(dataset: str, n: int, output: str, allow_shorter: bool = Fa
     :param dataset_config: HF dataset configuration name for test dataset.
     :param hf_cache: Path to the HF cache.
     """
-    ngram_map = defaultdict(int)    # ngram -> number of documents where the ngram is present
+    ngram_map = defaultdict(list)    # ngram -> number of documents where the ngram is present
     jsonl_read = dataset.endswith(".jsonl")
     reader = JSONLReader(dataset, format_str) if jsonl_read else HFDatasetReader(dataset, split, dataset_config,
                                                                                  format_str, hf_cache)
     with reader as r, tqdm(desc="Creating n-gram map", total=os.path.getsize(dataset) if jsonl_read else len(reader)) as pbar:
 
-        for line in r:
+        for i, line in enumerate(r):
             doc_ng = set()
             for ng in ngrams(normalize_text(line).split(), n, allow_shorter):
                 str_ng = json_dumps(ng)
@@ -54,14 +55,15 @@ def create_ngram_map(dataset: str, n: int, output: str, allow_shorter: bool = Fa
                     continue
 
                 doc_ng.add(str_ng)
-                ngram_map[str_ng] += 1
+
+                ngram_map[str_ng].append(i)
 
             if jsonl_read:
                 pbar.update(r.file.tell() - pbar.n)
             else:
                 pbar.update(1)
 
-    ngram_map["metadata"] = {"n": n, "allow_shorter": allow_shorter, "format_str": format_str}
+    ngram_map["metadata"] = {"n": n, "allow_shorter": allow_shorter, "format_str": format_str, "samples": i + 1}
     with open(output, "w") as f:
         json_dump(ngram_map, f)
 
@@ -79,13 +81,22 @@ def merge_maps(maps: Iterable[str], output: str):
     :param output: Path where the merged map will be stored.
     """
 
-    ngram_map = defaultdict(int)
+    ngram_map = defaultdict(list)
+    offset = 0
+    ngram_map["metadata"] = {}
     for map_path in maps:
         with open(map_path, "r") as f:
             map_data = json_load(f)
+
             for k, v in map_data.items():
                 if k != "metadata":
-                    ngram_map[k] += v
+                    ngram_map[k].extend([i + offset for i in v])
+
+            map_data["metadata"]["start_offset"] = offset
+            offset += map_data["metadata"]["samples"]
+            map_data["metadata"]["end_offset"] = offset
+
+            ngram_map["metadata"][Path(map_path).stem] = map_data["metadata"]
 
     with open(output, "w") as f:
         json_dump(ngram_map, f)
@@ -126,7 +137,6 @@ class DecontaminateWorker(FunctorWorker):
         self.field = field
         self.window_size = window_size
         self.removal_char_boundary = removal_char_boundary
-        self.dataset = None
 
     def __call__(self, proc: tuple[int, str]) -> Tuple[int, Optional[str]]:
         """
@@ -219,7 +229,7 @@ def decontaminate(dataset_path: str, ngram_map_file: str, output: str, field: st
         workers = multiprocessing.cpu_count()
 
     with open(ngram_map_file, "r") as f:
-        forbidden_ngrams = {k for k, v in json_load(f).items() if v <= ignore_above}
+        forbidden_ngrams = {k for k, v in json_load(f).items() if len(v) <= ignore_above}
 
     ngram_sizes = cnt_ngram_sizes(forbidden_ngrams)
 
@@ -250,6 +260,103 @@ def decontaminate_entry_point(args):
                   args.removal_char_boundary, workers=args.workers)
 
 
+class SearchContaminatedWorker(FunctorWorker):
+    """
+    Parallel worker for searching contaminated samples.
+    """
+    def __init__(self, forbidden_ngrams: dict[str, list[int]], ngram_sizes: list[int], field: str):
+        """
+        :param forbidden_ngrams:
+            key - ngram
+            value - list of indices of documents where the ngram is present
+                all those indexes are marked as contaminated when the ngram is found in input string
+        :param ngram_sizes: sizes of ngrams in the forbidden_ngrams
+        :param field: content field
+        """
+        super().__init__()
+        self.forbidden_ngrams = forbidden_ngrams
+        self.ngram_sizes = ngram_sizes
+        self.field = field
+
+    def __call__(self, proc: tuple[int, str]) -> Tuple[int, list[int]]:
+        """
+        Decontaminates the record on line_offset.
+
+        :param proc:
+            - number of read bytes
+            - line
+        :return:
+            - number of read bytes
+            - contaminated indices
+        """
+
+        proc_bytes = proc[0]
+        line = json_loads(proc[1])
+        content = line[self.field]
+
+        tokens = normalize_text(content).split()  # for normalized string the offsets remain the same
+
+        contaminated = set()
+
+        for n in self.ngram_sizes:
+            for ng in ngrams(tokens, n, allow_shorter=False):
+                str_ng = json_dumps(ng)
+                if str_ng in self.forbidden_ngrams:
+                    contaminated.update(self.forbidden_ngrams[str_ng])
+
+        return proc_bytes, list(contaminated)
+
+
+def search_contaminated(dataset_path: str, ngram_map_file: str, output: str, field: str, ignore_above: int = math.inf,
+                        workers: int = -1):
+    """
+    Decontaminates the dataset.
+
+    :param dataset_path: Path to jsonl dataset.
+    :param ngram_map_file: Path to n-gram map with n-grams that should be removed and their frequency among original documents.
+    :param output: Path where the decontaminated dataset will be stored.
+    :param field: content field
+    :param ignore_above: Ignore n-grams that are more frequent than this value.
+    :param workers: Number of parallel workers. If -1 then it will use all available CPUs.
+    """
+
+    workers = workers
+    if workers == -1:
+        workers = multiprocessing.cpu_count()
+
+    with open(ngram_map_file, "r") as f:
+        forbidden_ngrams = {k: v for k, v in json_load(f).items() if len(v) <= ignore_above}
+
+    ngram_sizes = cnt_ngram_sizes(forbidden_ngrams)
+
+    with open(dataset_path, "r") as dataset, \
+            tqdm(desc="Searching contaminated", total=os.path.getsize(dataset_path)) as pbar, open(output, "w") as out:
+
+        workers = [
+            SearchContaminatedWorker(forbidden_ngrams, ngram_sizes, field)
+            for _ in range(workers)
+        ]
+
+        def read_dataset():
+            line_offset = 0
+            while cur_line := dataset.readline():
+                yield dataset.tell() - line_offset, cur_line
+                line_offset = dataset.tell()
+
+        contaminated = set()
+        with FunctorPool(workers) as pool:
+            for proc_bytes, current_contaminated in pool.imap_unordered(read_dataset(), 100):
+                contaminated.update(current_contaminated)
+                pbar.update(proc_bytes)
+
+        json_dump(sorted(contaminated), out)
+
+
+def search_contaminated_entry_point(args):
+    search_contaminated(args.dataset, args.ngram_map, args.output, args.field, args.ignore_above,
+                        workers=args.workers)
+
+
 def main():
     logging.basicConfig(format='%(process)d: %(levelname)s : %(asctime)s : %(message)s', level=logging.WARNING)
 
@@ -274,7 +381,7 @@ def main():
 
     decontaminate_parser = subparsers.add_parser("decontaminate", help="Decontaminates the dataset.")
     decontaminate_parser.add_argument("dataset", help="Path to jsonl dataset.")
-    decontaminate_parser.add_argument("ngram_map", help="Path to n-gram map with n-grams that should be removed and their frequency among original documents.")
+    decontaminate_parser.add_argument("ngram_map", help="Path to n-gram map with n-grams that should be removed")
     decontaminate_parser.add_argument("output", help="Path where the decontaminated dataset will be stored.")
     decontaminate_parser.add_argument("--field", help="content field")
     decontaminate_parser.add_argument("--ignore_above", help="Ignore n-grams that are more frequent than this value.", type=int, default=None)
@@ -282,6 +389,15 @@ def main():
     decontaminate_parser.add_argument("--removal_char_boundary", help="If we are about te remove more than removal_char_boundary characters then whole document is discarded.", type=int, default=math.inf)
     decontaminate_parser.add_argument("--workers", help="Number of parallel workers. If -1 then it will use all available CPUs.", type=int, default=-1)
     decontaminate_parser.set_defaults(func=decontaminate_entry_point)
+
+    search_contaminated_parser = subparsers.add_parser("search_contaminated", help="Searches contaminated samples.")
+    search_contaminated_parser.add_argument("dataset", help="Path to jsonl dataset. Every ngram in this dataset is considered to be as contamination.")
+    search_contaminated_parser.add_argument("ngram_map", help="Path to n-gram map with n-grams and associated sample indices.")
+    search_contaminated_parser.add_argument("output", help="Path where the contaminated sample indices will be stored. The indice is considered contaiminated when associated ngram to indice occurs in the input dataset.")
+    search_contaminated_parser.add_argument("--field", help="content field")
+    search_contaminated_parser.add_argument("--ignore_above", help="Ignore n-grams that are more frequent than this value.", type=int, default=None)
+    search_contaminated_parser.add_argument("--workers", help="Number of parallel workers. If -1 then it will use all available CPUs.", type=int, default=-1)
+    search_contaminated_parser.set_defaults(func=search_contaminated_entry_point)
 
     args = parser.parse_args()
 
