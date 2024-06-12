@@ -1,0 +1,6 @@
+{"text": "This is positive review", "label": 1}
+{"text": "This is negative review", "label": 0}
+{"text": "This is neutral review", "label": 2}
+{"text": "This is still positive review", "label": 1}
+{"text": "This is still negative review", "label": 0}
+{"text": "This is still neutral review", "label": 2}

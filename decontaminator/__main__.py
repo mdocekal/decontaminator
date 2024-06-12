@@ -10,14 +10,18 @@ import logging
 import math
 import multiprocessing
 import os
+import sys
 from argparse import ArgumentParser
 from collections import defaultdict
+from csv import DictWriter
 from typing import Optional, Iterable, Tuple
 
 import orjson
+from datasets import load_dataset
 from tqdm import tqdm
 from pathlib import Path
 from windpyutils.parallel.own_proc_pools import FunctorWorker, FunctorPool
+from windpyutils.structures.maps import ImmutIntervalMap
 
 from decontaminator.cython.tokenizer import whitespace_tokenizer
 from decontaminator.myjson import json_dumps, json_loads, json_dump, json_load
@@ -278,7 +282,7 @@ class SearchContaminatedWorker(FunctorWorker):
         self.ngram_sizes = ngram_sizes
         self.field = field
 
-    def __call__(self, proc: tuple[int, str]) -> Tuple[int, list[int]]:
+    def __call__(self, proc: tuple[int, str]) -> Tuple[int, list[int], list[str]]:
         """
         Decontaminates the record on line_offset.
 
@@ -288,6 +292,7 @@ class SearchContaminatedWorker(FunctorWorker):
         :return:
             - number of read bytes
             - contaminated indices
+            - contaminated ngrams
         """
 
         proc_bytes = proc[0]
@@ -296,25 +301,32 @@ class SearchContaminatedWorker(FunctorWorker):
 
         tokens = normalize_text(content).split()  # for normalized string the offsets remain the same
 
-        contaminated = set()
+        contaminated_indices = set()
+        contaminated_ngrams = set()
 
         for n in self.ngram_sizes:
             for ng in ngrams(tokens, n, allow_shorter=False):
                 str_ng = json_dumps(ng)
+                if str_ng in contaminated_ngrams:
+                    continue
+
                 if str_ng in self.forbidden_ngrams:
-                    contaminated.update(self.forbidden_ngrams[str_ng])
+                    contaminated_indices.update(self.forbidden_ngrams[str_ng])
+                    contaminated_ngrams.add(str_ng)
 
-        return proc_bytes, list(contaminated)
+        return proc_bytes, list(contaminated_indices), list(contaminated_ngrams)
 
 
-def search_contaminated(dataset_path: str, ngram_map_file: str, output: str, field: str, ignore_above: int = math.inf,
+def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_indices_path: str, contaminated_ngrams_path: str,
+                        field: str, ignore_above: int = math.inf,
                         workers: int = -1):
     """
     Decontaminates the dataset.
 
     :param dataset_path: Path to jsonl dataset.
     :param ngram_map_file: Path to n-gram map with n-grams that should be removed and their frequency among original documents.
-    :param output: Path where the decontaminated dataset will be stored.
+    :param contaminated_indices_path: Path where the contaminated sample indices will be stored. The indice is considered contaiminated when associated ngram to indice occurs in the input dataset.
+    :param contaminated_ngrams_path: Path where the contaminated ngrams will be stored.
     :param field: content field
     :param ignore_above: Ignore n-grams that are more frequent than this value.
     :param workers: Number of parallel workers. If -1 then it will use all available CPUs.
@@ -330,7 +342,7 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, output: str, fie
     ngram_sizes = cnt_ngram_sizes(forbidden_ngrams)
 
     with open(dataset_path, "r") as dataset, \
-            tqdm(desc="Searching contaminated", total=os.path.getsize(dataset_path)) as pbar, open(output, "w") as out:
+            tqdm(desc="Searching contaminated", total=os.path.getsize(dataset_path)) as pbar:
 
         workers = [
             SearchContaminatedWorker(forbidden_ngrams, ngram_sizes, field)
@@ -343,18 +355,161 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, output: str, fie
                 yield dataset.tell() - line_offset, cur_line
                 line_offset = dataset.tell()
 
-        contaminated = set()
+        contaminated_indices = set()
+        contaminated_ngrams = set()
         with FunctorPool(workers) as pool:
-            for proc_bytes, current_contaminated in pool.imap_unordered(read_dataset(), 100):
-                contaminated.update(current_contaminated)
+            for proc_bytes, current_contaminated_indices, current_contaminated_ngrams in pool.imap_unordered(read_dataset(), 100):
+                contaminated_indices.update(current_contaminated_indices)
+                contaminated_ngrams.update(current_contaminated_ngrams)
                 pbar.update(proc_bytes)
 
-        json_dump(sorted(contaminated), out)
+        with open(contaminated_indices_path, "w") as out:
+            json_dump(sorted(contaminated_indices), out)
+
+        with open(contaminated_ngrams_path, "w") as out:
+            json_dump(sorted(contaminated_ngrams), out)
 
 
 def search_contaminated_entry_point(args):
-    search_contaminated(args.dataset, args.ngram_map, args.output, args.field, args.ignore_above,
+    search_contaminated(args.dataset, args.ngram_map, args.contaminated_indices, args.contaminated_ngrams,
+                        args.field, args.ignore_above,
                         workers=args.workers)
+
+
+def indices_2_dataset_indices(indices: str, ngram_map: str, output: str):
+    """
+    Converts indices of merged dataset into indices of original datasets.
+
+    :param indices: Path to json file with indices of merged dataset.
+    :param ngram_map: Path to merged n-gram map. Its metadata should contain information about the original datasets.
+    :param output: Path to results.
+    It will create a json file with map having dataset names as keys and list of indices as values.
+    """
+
+    with open(indices, "r") as f:
+        indices = json_load(f)
+
+    with open(ngram_map, "r") as f:
+        ngram_map = json_load(f)
+
+    indices = sorted(indices)
+
+    dataset_indices = defaultdict(list)
+
+    dataset_names = sorted(ngram_map["metadata"].keys(), key=lambda x: ngram_map["metadata"][x]["start_offset"])
+
+    current_dataset = 0
+
+    for i in indices:
+        while i >= ngram_map["metadata"][dataset_names[current_dataset]]["end_offset"] and current_dataset < len(dataset_names):
+            current_dataset += 1
+
+        dataset_indices[dataset_names[current_dataset]].append(
+            i - ngram_map["metadata"][dataset_names[current_dataset]]["start_offset"]
+        )
+
+    with open(output, "w") as f:
+        json_dump(dataset_indices, f)
+
+
+def indices_2_dataset_indices_entry_point(args):
+    indices_2_dataset_indices(args.indices, args.ngram_map, args.output)
+
+
+def contaminated_ngrams_per_dataset(ngrams_path: str, ngram_map: str, output: str):
+    """
+    From a list of contaminated ngrams creates a map of ngrams per each dataset, and it assigns associated
+    indices of contaminated samples
+
+    :param ngrams_path: Path to json file with list of contaminated ngrams.
+    :param ngram_map: Path to merged n-gram map. Its metadata should contain information about the original datasets.
+    :param output: Path to results.
+    """
+
+    with open(ngrams_path, "r") as f:
+        contaminated_ngrams = json_load(f)
+
+    with open(ngram_map, "r") as f:
+        ngram_map = json_load(f)
+
+    res = defaultdict(lambda: defaultdict(list))
+
+    interval_2_dataset = ImmutIntervalMap({
+        (metadata["start_offset"], metadata["end_offset"]-1): dataset for dataset, metadata in ngram_map["metadata"].items()
+    })
+
+    for ngram in contaminated_ngrams:
+        indices = ngram_map[ngram]
+
+        for i in indices:
+            dataset = interval_2_dataset[i]
+            res[dataset][ngram].append(i-ngram_map["metadata"][dataset]["start_offset"])
+
+    with open(output, "w") as f:
+        json_dump(res, f)
+
+
+def contaminated_ngrams_per_dataset_entry_point(args):
+    contaminated_ngrams_per_dataset(args.ngrams_path, args.ngram_map, args.output)
+
+
+def filter_hf_dataset(dataset: str, config: Optional[str], split: Optional[str], output: str, contaminated_indices: str,
+                      contaminated_indices_selector: Optional[str] = None, hf_cache: Optional[str] = None,
+                      write_csv_header: bool = True):
+    """
+    Filters the HF dataset.
+
+    :param dataset: Path to the HF dataset.
+    :param config: Name of the configuration.
+    :param split: Split name of the dataset.
+    :param output: Path to the output.
+    :param contaminated_indices: Path to the contaminated indices.
+    :param contaminated_indices_selector: When the contaminated_indices file contains indices for multiple datasets
+        then this argument allows to select only indices for the current dataset.
+    :param hf_cache: Path to the HF cache.
+    :param write_csv_header: If True then it will write the header of the CSV.
+    """
+    with open(contaminated_indices, "r") as f:
+        contaminated_indices = json_load(f)
+        if contaminated_indices_selector is not None:
+            try:
+                contaminated_indices = contaminated_indices[contaminated_indices_selector]
+            except KeyError:
+                contaminated_indices = []
+
+        contaminated_indices = set(contaminated_indices)
+
+    dataset_path = dataset
+    dataset = load_dataset(dataset, config, cache_dir=hf_cache)
+
+    if len(contaminated_indices):
+        split_of_interest = dataset if split is None else dataset[split]
+        filtered = split_of_interest.select([i for i in range(len(split_of_interest)) if i not in contaminated_indices])
+
+        csv_writer = DictWriter(sys.stdout, fieldnames=["dataset", "config", "split", "number of contaminated indices", "contamination percentage"])
+        if write_csv_header:
+            csv_writer.writeheader()
+
+        csv_writer.writerow({
+            "dataset": dataset_path,
+            "config": config,
+            "split": split,
+            "number of contaminated indices": len(contaminated_indices),
+            "contamination percentage": len(contaminated_indices)/len(split_of_interest) * 100
+        })
+
+        if split is None:
+            dataset = filtered
+        else:
+            dataset[split] = filtered
+
+    for split_name, split_dataset in dataset.items():
+        split_dataset.to_json(Path(output) / f"{split_name}.jsonl", force_ascii=False)
+
+
+def filter_hf_dataset_entry_point(args):
+    filter_hf_dataset(args.dataset, args.dataset_config, args.split, args.output, args.contaminated_indices,
+                      args.contaminated_indices_selector, args.hf_cache, args.write_csv_header)
 
 
 def main():
@@ -390,14 +545,39 @@ def main():
     decontaminate_parser.add_argument("--workers", help="Number of parallel workers. If -1 then it will use all available CPUs.", type=int, default=-1)
     decontaminate_parser.set_defaults(func=decontaminate_entry_point)
 
-    search_contaminated_parser = subparsers.add_parser("search_contaminated", help="Searches contaminated samples.")
+    search_contaminated_parser = subparsers.add_parser("search_contaminated", help="Searches contaminated samples and ngrams.")
     search_contaminated_parser.add_argument("dataset", help="Path to jsonl dataset. Every ngram in this dataset is considered to be as contamination.")
     search_contaminated_parser.add_argument("ngram_map", help="Path to n-gram map with n-grams and associated sample indices.")
-    search_contaminated_parser.add_argument("output", help="Path where the contaminated sample indices will be stored. The indice is considered contaiminated when associated ngram to indice occurs in the input dataset.")
+    search_contaminated_parser.add_argument("contaminated_indices", help="Path where the contaminated sample indices will be stored. The indice is considered contaiminated when associated ngram to indice occurs in the input dataset.")
+    search_contaminated_parser.add_argument("contaminated_ngrams", help="Path where the contaminated ngrams will be stored.")
     search_contaminated_parser.add_argument("--field", help="content field")
     search_contaminated_parser.add_argument("--ignore_above", help="Ignore n-grams that are more frequent than this value.", type=int, default=None)
     search_contaminated_parser.add_argument("--workers", help="Number of parallel workers. If -1 then it will use all available CPUs.", type=int, default=-1)
     search_contaminated_parser.set_defaults(func=search_contaminated_entry_point)
+
+    indices_2_dataset_indices_parser = subparsers.add_parser("indices_2_dataset_indices", help="Converts indices of merged dataset into indices of original datasets.")
+    indices_2_dataset_indices_parser.add_argument("indices", help="Path to json file with indices of merged dataset.")
+    indices_2_dataset_indices_parser.add_argument("ngram_map",
+                                                  help="Path to merged n-gram map. Its metadata should contain information about the original datasets.")
+    indices_2_dataset_indices_parser.add_argument("output", help="Path to results. It will create a json file with map having dataset names as keys and list of indices as values.")
+    indices_2_dataset_indices_parser.set_defaults(func=indices_2_dataset_indices_entry_point)
+
+    contaminated_ngrams_per_dataset_parser = subparsers.add_parser("contaminated_ngrams_per_dataset", help="From a list of contaminated ngrams creates a map of ngrams per each dataset and it assigns associated indices of contaminated samples.")
+    contaminated_ngrams_per_dataset_parser.add_argument("ngrams_path", help="Path to json file with list of contaminated ngrams.")
+    contaminated_ngrams_per_dataset_parser.add_argument("ngram_map", help="Path to merged n-gram map. Its metadata should contain information about the original datasets.")
+    contaminated_ngrams_per_dataset_parser.add_argument("output", help="Path to results.")
+    contaminated_ngrams_per_dataset_parser.set_defaults(func=contaminated_ngrams_per_dataset_entry_point)
+
+    filter_hf_dataset_parser = subparsers.add_parser("filter_hf_dataset", help="Filters the HF dataset.")
+    filter_hf_dataset_parser.add_argument("dataset", help="Path to the HF dataset.")
+    filter_hf_dataset_parser.add_argument("output", help="Path to the output.")
+    filter_hf_dataset_parser.add_argument("contaminated_indices", help="Path to the contaminated indices.")
+    filter_hf_dataset_parser.add_argument("--dataset_config", help="Name of the configuration.", default=None)
+    filter_hf_dataset_parser.add_argument("--split", help="Split name of the dataset.", default=None)
+    filter_hf_dataset_parser.add_argument("--contaminated_indices_selector", help="When the contaminated_indices file contains indices for multiple datasets then this argument allows to select only indices for the current dataset.", default=None)
+    filter_hf_dataset_parser.add_argument("--hf_cache", help="Path to the HF cache.", default=None)
+    filter_hf_dataset_parser.add_argument("--write_csv_header", help="If True then it will write the header of the CSV.", action="store_true")
+    filter_hf_dataset_parser.set_defaults(func=filter_hf_dataset_entry_point)
 
     args = parser.parse_args()
 

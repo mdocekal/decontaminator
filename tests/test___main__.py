@@ -10,7 +10,10 @@ from pathlib import Path
 from shutil import rmtree
 from unittest import TestCase
 
-from decontaminator.__main__ import create_ngram_map, decontaminate, search_contaminated
+from datasets import load_dataset, load_from_disk
+
+from decontaminator.__main__ import create_ngram_map, decontaminate, search_contaminated, indices_2_dataset_indices, \
+    filter_hf_dataset, contaminated_ngrams_per_dataset
 from decontaminator.myjson import json_dumps
 
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -115,21 +118,76 @@ class TestDecontaminate(TestBase):
 
 
 CONTAMINATED_SEARCH_MAP_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_map.json")
-CONTAMINATED_SEARCH_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_results.json")
-CONTAMINATED_SEARCH_RESULTS_COMMON_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_results_common.json")
-CONTAMINATED_SEARCH_OUTPUT_PATH = os.path.join(TMP_PATH, "contaminated_search_results.json")
+CONTAMINATED_SEARCH_INDICES_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_indices_results.json")
+CONTAMINATED_SEARCH_INDICES_RESULTS_COMMON_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_indices_results_common.json")
+CONTAMINATED_SEARCH_NGRAM_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_ngram_results.json")
+CONTAMINATED_SEARCH_NGRAM_RESULTS_COMMON_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_ngram_results_common.json")
+CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH = os.path.join(TMP_PATH, "contaminated_search_indices_results.json")
+CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH = os.path.join(TMP_PATH, "contaminated_search_ngram_results.json")
 
 
 class TestSearchContaminated(TestBase):
 
     def test_search_contaminated(self):
         search_contaminated(DATASET_FOR_DECONTAMINATE_PATH, CONTAMINATED_SEARCH_MAP_PATH,
-                            CONTAMINATED_SEARCH_OUTPUT_PATH, "content", workers=1)
+                            CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH,
+                            "content", workers=1)
 
-        self.compare_jsonl(CONTAMINATED_SEARCH_RESULTS_PATH, CONTAMINATED_SEARCH_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_SEARCH_INDICES_RESULTS_PATH, CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_SEARCH_NGRAM_RESULTS_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH)
 
     def test_search_contaminated_common(self):
         search_contaminated(DATASET_FOR_DECONTAMINATE_PATH, CONTAMINATED_SEARCH_MAP_PATH,
-                            CONTAMINATED_SEARCH_OUTPUT_PATH, "content", ignore_above=2, workers=1)
+                            CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH,
+                            "content", ignore_above=2, workers=1)
 
-        self.compare_jsonl(CONTAMINATED_SEARCH_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_SEARCH_INDICES_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_SEARCH_NGRAM_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH)
+
+
+INDICES_PATH = os.path.join(FIXTURES_PATH, "indices.json")
+MAP_METADATA_FOR_INDICES_CONVERSION_PATH = os.path.join(FIXTURES_PATH, "map_metadata_for_indices_conversion.json")
+CONVERTED_INDICES_PATH = os.path.join(FIXTURES_PATH, "converted_indices.json")
+CONVERTED_INDICES_OUTPUT_PATH = os.path.join(TMP_PATH, "converted_indices.json")
+
+
+class TestIndices2DatasetIndices(TestBase):
+    def test_indices_2_dataset_indices(self):
+        indices_2_dataset_indices(INDICES_PATH, MAP_METADATA_FOR_INDICES_CONVERSION_PATH, CONVERTED_INDICES_OUTPUT_PATH)
+        self.compare_jsonl(CONVERTED_INDICES_PATH, CONVERTED_INDICES_OUTPUT_PATH)
+
+
+CONTAMINATED_NGRAMS_PER_DATASET_PATH = os.path.join(FIXTURES_PATH, "contaminated_ngrams_per_dataset.json")
+CONTAMINATED_NGRAMS_PER_DATASET_OUTPUT_PATH = os.path.join(TMP_PATH, "contaminated_ngrams_per_dataset.json")
+
+
+class TestContaminatedNGramsPerDataset(TestBase):
+    def test_contaminated_ngrams_per_dataset(self):
+        contaminated_ngrams_per_dataset(CONTAMINATED_SEARCH_NGRAM_RESULTS_PATH, CONTAMINATED_SEARCH_MAP_PATH,
+                                        CONTAMINATED_NGRAMS_PER_DATASET_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_NGRAMS_PER_DATASET_PATH, CONTAMINATED_NGRAMS_PER_DATASET_OUTPUT_PATH)
+
+
+HF_DATASET_PATH = os.path.join(FIXTURES_PATH, "hf_dataset")
+FILTERING_INDICES_PATH = os.path.join(FIXTURES_PATH, "filtering_indices.json")
+FILTERED_HF_DATASET_PATH = os.path.join(FIXTURES_PATH, "filtered_hf_dataset")
+FILTERED_HF_DATASET_OUTPUT_PATH = os.path.join(TMP_PATH, "filtered_hf_dataset")
+
+
+class TestFilterHFDataset(TestBase):
+    def test_filter_hf_dataset(self):
+        filter_hf_dataset(HF_DATASET_PATH, None, "test", FILTERED_HF_DATASET_OUTPUT_PATH, FILTERING_INDICES_PATH,
+                          "hf_dataset")
+
+        gt_dataset = load_dataset(FILTERED_HF_DATASET_PATH)
+        res_dataset = load_dataset(FILTERED_HF_DATASET_OUTPUT_PATH)
+
+        self.assertEqual(len(gt_dataset), len(res_dataset))
+        self.assertEqual(len(gt_dataset["train"]), len(res_dataset["train"]))
+        self.assertEqual(len(gt_dataset["validation"]), len(res_dataset["validation"]))
+        self.assertEqual(len(gt_dataset["test"]), len(res_dataset["test"]))
+
+        for split in ["train", "validation", "test"]:
+            for gt_data, res_data in zip(gt_dataset[split], res_dataset[split]):
+                self.assertDictEqual(gt_data, res_data, msg=f"Problem with {split}")
+
