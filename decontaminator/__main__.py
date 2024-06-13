@@ -562,7 +562,7 @@ def main():
     indices_2_dataset_indices_parser.add_argument("output", help="Path to results. It will create a json file with map having dataset names as keys and list of indices as values.")
     indices_2_dataset_indices_parser.set_defaults(func=indices_2_dataset_indices_entry_point)
 
-    contaminated_ngrams_per_dataset_parser = subparsers.add_parser("contaminated_ngrams_per_dataset", help="From a list of contaminated ngrams creates a map of ngrams per each dataset and it assigns associated indices of contaminated samples.")
+    contaminated_ngrams_per_dataset_parser = subparsers.add_parser("contaminated_ngrams_per_dataset", help="From a list of contaminated ngrams creates a map of ngrams per each dataset and assigns associated indices of contaminated samples.")
     contaminated_ngrams_per_dataset_parser.add_argument("ngrams_path", help="Path to json file with list of contaminated ngrams.")
     contaminated_ngrams_per_dataset_parser.add_argument("ngram_map", help="Path to merged n-gram map. Its metadata should contain information about the original datasets.")
     contaminated_ngrams_per_dataset_parser.add_argument("output", help="Path to results.")
