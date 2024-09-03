@@ -11,6 +11,7 @@ from shutil import rmtree
 from unittest import TestCase
 
 from datasets import load_dataset, load_from_disk
+import string
 
 from decontaminator.__main__ import create_ngram_map, decontaminate, search_contaminated, indices_2_dataset_indices, \
     filter_hf_dataset, contaminated_ngrams_per_dataset
@@ -90,7 +91,8 @@ class TestCreateNgramMap(TestBase):
                 "n": 2,
                 "allow_shorter": False,
                 "format_str": "{content}",
-                "samples": 3
+                "samples": 3,
+                "sub_chars": [string.punctuation]
             })
 
 
