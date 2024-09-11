@@ -8,11 +8,11 @@ Use the standard requirements.txt for installation of other packages:
 
 Also, as there are Cython extensions, you need to build them:
     
-        python setup.py build_ext --inplace
+    python setup.py build_ext --inplace
 
 or use:
     
-        ./build_cython.sh
+    ./build_cython.sh
 
 You can also install it as a package:
 
@@ -24,7 +24,7 @@ You can also install it as a package:
 
 At first, we need to gather all ngrams in our test sets and obtain in which samples they are present. We can do it by running the following command:
 
-    ./run.py run.py make_ngram_map hynky/klokan-qa klokan_qa_map.json 13 --dataset_config "balanced" --format_str "{question}" --split "test" --allow_shorter --hf_cache "hf_cache"
+    ./run.py run.py make_ngram_map hynky/klokan-qa klokan_qa_map.json 13 --dataset_config "balanced" --format_str "{{question}}" --split "test" --allow_shorter --hf_cache "hf_cache"
 
 This command will create a file `klokan_qa_map.json` with 13grams and their samples from HuggingFace dataset `hynky/klokan-qa`. It will work with the `balanced` configuration of the dataset and will use the `question` field for the ngram extraction. The `--split` selects test split. The `--allow_shorter` flag allows extraction of shorter ngrams when the string is shorter than the ngram size.  Finally, the `--hf_cache` specifies the directory for the Hugging Face cache.
 

@@ -15,7 +15,7 @@ from argparse import ArgumentParser
 from collections import defaultdict
 from csv import DictWriter
 from pathlib import Path
-from typing import Optional, Iterable, Tuple, Union
+from typing import Optional, Iterable, Tuple, Union, Sequence
 
 from datasets import load_dataset
 from tqdm import tqdm
@@ -30,8 +30,8 @@ from decontaminator.reader import HFDatasetReader, JSONLReader
 
 
 def create_ngram_map(dataset: str, n: int, output: str, allow_shorter: bool = False, min_ngram: int = 1,
-                     format_str: str = None, split: Optional[str] = None, dataset_config: str = None, hf_cache: str = None,
-                     sub_chars: str = string.punctuation):
+                     format_str: Union[str, Sequence[str]] = None, split: Optional[str] = None, dataset_config: str = None,
+                     hf_cache: str = None, sub_chars: str = string.punctuation):
     """
     Creates n-gram map from the dataset.
 
@@ -40,30 +40,37 @@ def create_ngram_map(dataset: str, n: int, output: str, allow_shorter: bool = Fa
     :param output: Path to the output.
     :param allow_shorter: If the sequence is shorter than n, it will generate one n-gram that will be the same as the sequence.
     :param min_ngram: If allow_shorter is set then this argument allows to set the minimal size of the n-gram.
-    :param format_str: This argument allows to select only certain columns and marge them using this formating string.
-        E.g.: '{firstname} {lastname}'
+    :param format_str: his argument allows to select only certain columns and marge them using jinja template.
+        E.g.: '{{firstname}} {{lastname}}'.
+        You can also use multiple strings, in that case all the formatted strings will be treated separately and
+        during contamination a sample will be considered contaminated only when at least
+        one ngram from all of these is contaminated.
     :param split: HF dataset split name for test dataset.
     :param dataset_config: HF dataset configuration name for test dataset.
     :param hf_cache: Path to the HF cache.
     :param sub_chars: String of all characters that are supposed to be translated to whitespace. By default, we remove punctuation.
     """
-    ngram_map = defaultdict(list)    # ngram -> number of documents where the ngram is present
+    ngram_map = defaultdict(list)    # ngram -> documents where the ngram is present
     jsonl_read = dataset.endswith(".jsonl")
     reader = JSONLReader(dataset, format_str) if jsonl_read else HFDatasetReader(dataset, split, dataset_config,
                                                                                  format_str, hf_cache)
     sub_chars_table = str.maketrans(sub_chars, " " * len(sub_chars))
+    multi_version = not isinstance(format_str, str)
     with reader as r, tqdm(desc="Creating n-gram map", total=os.path.getsize(dataset) if jsonl_read else len(reader)) as pbar:
-
         for i, line in enumerate(r):
-            doc_ng = set()
-            for ng in ngrams(normalize_text(line, sub_chars_table).split(), n, allow_shorter, min_ngram):
-                str_ng = json_dumps(ng)
-                if str_ng in doc_ng:
-                    continue
+            for version_i, version in enumerate(line) if multi_version else [(0, line)]:
+                doc_ng = set()
+                for ng in ngrams(normalize_text(version, sub_chars_table).split(), n, allow_shorter, min_ngram):
+                    str_ng = json_dumps(ng)
+                    if str_ng in doc_ng:
+                        continue
 
-                doc_ng.add(str_ng)
+                    doc_ng.add(str_ng)
 
-                ngram_map[str_ng].append(i)
+                    if multi_version:
+                        ngram_map[str_ng].append(f"{i}_{version_i+1}/{len(line)}")
+                    else:
+                        ngram_map[str_ng].append(i)
 
             if jsonl_read:
                 pbar.update(r.file.tell() - pbar.n)
@@ -395,14 +402,27 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_ind
                 line_offset = dataset.tell()
 
         contaminated_indices = set()
+        contaminated_indices_multi_version = defaultdict(set)   # we need to cover all version to mark index as contaminated
         contaminated_ngrams = defaultdict(list)
         with FunctorPool(workers) as pool:
             for proc_bytes, current_contaminated_indices, current_contaminated_ngrams, contamination_source in pool.imap_unordered(read_dataset(), 100):
-                contaminated_indices.update(current_contaminated_indices)
+                for i in current_contaminated_indices:
+                    if isinstance(i, str):
+                        i_part, version = i.split("_")
+                        version_i, versions_num = map(int, version.split("/"))
+                        contaminated_indices_multi_version[(int(i_part), versions_num)].add(version_i)
+                    else:
+                        contaminated_indices.add(i)
+
                 for ngram in current_contaminated_ngrams:
                     contaminated_ngrams[ngram].append(contamination_source)
 
                 pbar.update(proc_bytes)
+
+        # merge multi version indices
+        for (i, versions_num), version_indices in contaminated_indices_multi_version.items():
+            if len(version_indices) == versions_num:
+                contaminated_indices.add(i)
 
         with open(contaminated_indices_path, "w") as out:
             json_dump(sorted(contaminated_indices), out)
@@ -525,22 +545,22 @@ def filter_hf_dataset(dataset: str, config: Optional[str], split: Optional[str],
     dataset_path = dataset
     dataset = load_dataset(dataset, config, cache_dir=hf_cache)
 
+    split_of_interest = dataset if split is None else dataset[split]
+
+    csv_writer = DictWriter(sys.stdout, fieldnames=["dataset", "config", "split", "number of contaminated indices", "contamination percentage"])
+    if write_csv_header:
+        csv_writer.writeheader()
+
+    csv_writer.writerow({
+        "dataset": dataset_path,
+        "config": config,
+        "split": split,
+        "number of contaminated indices": len(contaminated_indices),
+        "contamination percentage": len(contaminated_indices)/len(split_of_interest) * 100
+    })
+
     if len(contaminated_indices):
-        split_of_interest = dataset if split is None else dataset[split]
         filtered = split_of_interest.select([i for i in range(len(split_of_interest)) if i not in contaminated_indices])
-
-        csv_writer = DictWriter(sys.stdout, fieldnames=["dataset", "config", "split", "number of contaminated indices", "contamination percentage"])
-        if write_csv_header:
-            csv_writer.writeheader()
-
-        csv_writer.writerow({
-            "dataset": dataset_path,
-            "config": config,
-            "split": split,
-            "number of contaminated indices": len(contaminated_indices),
-            "contamination percentage": len(contaminated_indices)/len(split_of_interest) * 100
-        })
-
         if split is None:
             dataset = filtered
         else:
@@ -567,7 +587,7 @@ def main():
     make_ngram_map_parser.add_argument("n", help="Size of n-gram.", type=int)
     make_ngram_map_parser.add_argument("--allow_shorter", help="If the sequence is shorter than n, it will generate one n-gram that will be the same as the sequence.", action="store_true")
     make_ngram_map_parser.add_argument("--min", help="If allow_shorter is set then this argument allows to set the minimal size of the n-gram.", type=int, default=1)
-    make_ngram_map_parser.add_argument("--format_str", help="This argument allows to select only certain columns and marge them using this formating string. E.g.: '{firstname} {lastname}'", default=None)
+    make_ngram_map_parser.add_argument("--format_str", help="This argument allows to select only certain columns and marge them using jinja template. E.g.: '{{firstname}} {{lastname}}'. You can also use multiple strings, in that case all the formatted string will be treated separately and during contamination a sample will be considered contaminated only when at least one ngram from all of these is contaminated.", default=None, nargs="+")
     make_ngram_map_parser.add_argument("--split", help="HF dataset split name for test dataset.", default=None)
     make_ngram_map_parser.add_argument("--dataset_config", help="HF dataset configuration name for test dataset.", default=None)
     make_ngram_map_parser.add_argument("--hf_cache", help="Path to the HF cache.", default=None)

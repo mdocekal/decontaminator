@@ -73,8 +73,7 @@ CREATED_MAP_PATH = os.path.join(TMP_PATH, "created_map.db")
 class TestCreateNgramMap(TestBase):
 
     def test_create_ngram_map(self):
-        create_ngram_map(DATASET_FOR_MAP_CREATE_PATH, 2, CREATED_MAP_PATH, format_str="{content}",
-                         hf_cache=None)
+        create_ngram_map(DATASET_FOR_MAP_CREATE_PATH, 2, CREATED_MAP_PATH, format_str="{{content}}", hf_cache=None)
 
         with open(CREATED_MAP_PATH, "r") as f:
             db = json.load(f)
@@ -90,7 +89,32 @@ class TestCreateNgramMap(TestBase):
             self.assertEqual(db["metadata"], {
                 "n": 2,
                 "allow_shorter": False,
-                "format_str": "{content}",
+                "format_str": "{{content}}",
+                "samples": 3,
+                "sub_chars": [string.punctuation]
+            })
+
+    def test_create_ngram_map_multiple_versions(self):
+        create_ngram_map(DATASET_FOR_MAP_CREATE_PATH, 2, CREATED_MAP_PATH, format_str=["{{content}}", "{{id}} {{content}}"], hf_cache=None)
+
+        with open(CREATED_MAP_PATH, "r") as f:
+            db = json.load(f)
+            self.assertEqual(len(db), 12)
+            self.assertEqual(db[json_dumps(["0", "hello"])], ["0_2/2"])
+            self.assertEqual(db[json_dumps(["hello", "world"])], ["0_1/2", "0_2/2", "1_1/2", "1_2/2"])
+            self.assertEqual(db[json_dumps(["1", "hello"])], ["1_2/2"])
+            self.assertEqual(db[json_dumps(["world", "how"])], ["1_1/2", "1_2/2"])
+            self.assertEqual(db[json_dumps(["how", "are"])], ["1_1/2", "1_2/2"])
+            self.assertEqual(db[json_dumps(["are", "you"])], ["1_1/2", "1_2/2"])
+            self.assertEqual(db[json_dumps(["2", "i"])], ["2_2/2"])
+            self.assertEqual(db[json_dumps(["i", "m"])], ["2_1/2", "2_2/2"])
+            self.assertEqual(db[json_dumps(["m", "fine"])], ["2_1/2", "2_2/2"])
+            self.assertEqual(db[json_dumps(["fine", "thank"])], ["2_1/2", "2_2/2"])
+            self.assertEqual(db[json_dumps(["thank", "you"])], ["2_1/2", "2_2/2"])
+            self.assertEqual(db["metadata"], {
+                "n": 2,
+                "allow_shorter": False,
+                "format_str": ["{{content}}", "{{id}} {{content}}"],
                 "samples": 3,
                 "sub_chars": [string.punctuation]
             })
@@ -120,6 +144,7 @@ class TestDecontaminate(TestBase):
 
 
 CONTAMINATED_SEARCH_MAP_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_map.json")
+CONTAMINATED_SEARCH_MAP_MULTI_VERSION_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_map_multi_version.json")
 CONTAMINATED_SEARCH_INDICES_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_indices_results.json")
 CONTAMINATED_SEARCH_INDICES_RESULTS_COMMON_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_indices_results_common.json")
 CONTAMINATED_SEARCH_NGRAM_RESULTS_PATH = os.path.join(FIXTURES_PATH, "contaminated_search_ngram_results.json")
@@ -145,6 +170,14 @@ class TestSearchContaminated(TestBase):
 
         self.compare_jsonl(CONTAMINATED_SEARCH_INDICES_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH)
         self.compare_jsonl(CONTAMINATED_SEARCH_NGRAM_RESULTS_COMMON_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH)
+
+    def test_search_contaminated_multi_version(self):
+        search_contaminated(DATASET_FOR_DECONTAMINATE_PATH, CONTAMINATED_SEARCH_MAP_MULTI_VERSION_PATH,
+                            CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH,
+                            "content", workers=1)
+
+        self.compare_jsonl(CONTAMINATED_SEARCH_INDICES_RESULTS_PATH, CONTAMINATED_SEARCH_INDICES_OUTPUT_PATH)
+        self.compare_jsonl(CONTAMINATED_SEARCH_NGRAM_RESULTS_PATH, CONTAMINATED_SEARCH_NGRAM_OUTPUT_PATH)
 
 
 INDICES_PATH = os.path.join(FIXTURES_PATH, "indices.json")

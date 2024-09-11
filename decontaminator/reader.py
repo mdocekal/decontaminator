@@ -5,10 +5,11 @@ Created on 03.06.24
 :author:     Martin Dočekal
 """
 from abc import ABC, abstractmethod
-from typing import Generator, Optional
+from typing import Generator, Optional, Union, Sequence
 
 import orjson
 from datasets import load_dataset
+import jinja2
 
 
 class Reader(ABC):
@@ -16,13 +17,25 @@ class Reader(ABC):
     Abstract reader class.
     """
 
-    def __init__(self, format_str: str):
+    def __init__(self, format_str: Optional[Union[str, Sequence[str]]] = None):
         """
         Initializes reader.
 
         :param format_str: Format string that will be used for formatting the output.
+            If None whole line will be returned.
+            If sequence of strings is provided, multiple variants of the output will be returned.
         """
         self.format_str = format_str
+        self.jinja = None
+        self.multi_format = False
+        if format_str is not None:
+            if isinstance(format_str, str):
+                self.jinja = jinja2.Environment(loader=jinja2.BaseLoader()).from_string(format_str)
+            else:
+                self.multi_format = True
+                self.jinja = [
+                    jinja2.Environment(loader=jinja2.BaseLoader()).from_string(f) for f in format_str
+                ]
 
     @abstractmethod
     def __enter__(self):
@@ -33,7 +46,7 @@ class Reader(ABC):
         ...
 
     @abstractmethod
-    def __iter__(self) -> Generator[str, None, None]:
+    def __iter__(self) -> Generator[Union[str, Sequence[str]], None, None]:
         ...
 
 
@@ -42,7 +55,8 @@ class HFDatasetReader(Reader):
     Reader for the HF dataset.
     """
 
-    def __init__(self, dataset: str, split: str, config_name: str, format_str: str, hf_cache: Optional[str] = None):
+    def __init__(self, dataset: str, split: str, config_name: str, format_str: Union[str, Sequence[str]],
+                 hf_cache: Optional[str] = None):
         """
         Initializes reader.
 
@@ -50,6 +64,7 @@ class HFDatasetReader(Reader):
         :param split: Split name of the dataset.
         :param config_name: Name of the configuration.
         :param format_str: Format string that will be used for formatting the output.
+            If sequence of strings is provided, multiple variants of the output will be returned.
         :param hf_cache: Path to the HF cache.
         """
         super().__init__(format_str)
@@ -65,7 +80,10 @@ class HFDatasetReader(Reader):
 
     def __iter__(self):
         for data in self._reader:
-            yield self.format_str.format(**data)
+            if self.multi_format:
+                yield [j.render(data) for j in self.jinja]
+            else:
+                yield self.jinja.render(data)
 
     def __len__(self):
         return len(self._reader)
@@ -76,13 +94,14 @@ class JSONLReader(Reader):
     Reader for the JSONL dataset.
     """
 
-    def __init__(self, dataset: str, format_str: Optional[str] = None):
+    def __init__(self, dataset: str, format_str: Optional[Union[str, Sequence[str]]] = None):
         """
         Initializes reader.
 
         :param dataset: Path to the JSONL dataset.
         :param format_str: Format string that will be used for formatting the output.
             If None whole line will be returned.
+            If sequence of strings is provided, multiple variants of the output will be returned.
         """
         super().__init__(format_str)
         self.dataset = dataset
@@ -103,4 +122,8 @@ class JSONLReader(Reader):
             return
         else:
             while line := self.file.readline():
-                yield self.format_str.format(**orjson.loads(line))
+                record = orjson.loads(line)
+                if self.multi_format:
+                    yield [j.render(record) for j in self.jinja]
+                else:
+                    yield self.jinja.render(record)
