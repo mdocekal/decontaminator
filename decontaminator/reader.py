@@ -12,6 +12,17 @@ from datasets import load_dataset
 import jinja2
 
 
+@jinja2.pass_context
+def vars_context(context) -> dict:
+    """
+    Jinja2 context function that returns the context as a dictionary.
+
+    :param context: Jinja2 context.
+    :return: Dictionary representation of the context.
+    """
+    return dict(context)
+
+
 class Reader(ABC):
     """
     Abstract reader class.
@@ -31,11 +42,14 @@ class Reader(ABC):
         if format_str is not None:
             if isinstance(format_str, str):
                 self.jinja = jinja2.Environment(loader=jinja2.BaseLoader()).from_string(format_str)
+                self.jinja.globals["vars"] = vars_context
             else:
                 self.multi_format = True
                 self.jinja = [
                     jinja2.Environment(loader=jinja2.BaseLoader()).from_string(f) for f in format_str
                 ]
+                for j in self.jinja:
+                    j.globals["vars"] = vars_context
 
     @abstractmethod
     def __enter__(self):
