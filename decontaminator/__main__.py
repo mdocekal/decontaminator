@@ -93,6 +93,19 @@ def create_ngram_map_entry_point(args):
                      args.dataset_config, args.hf_cache, args.sub_chars)
 
 
+def parse_version_offset(version_offset: str) -> Tuple[int, int, int]:
+    """
+    Parses version offset string.
+
+    :param version_offset: Version offset string.
+    :return: Tuple of sample index, version index and number of versions.
+    """
+
+    sample, version = version_offset.split("_")
+    version, num_of_versions = map(int, version.split("/"))
+    return int(sample), version, num_of_versions
+
+
 def merge_maps(maps: Iterable[str], output: str):
     """
     Merges n-gram maps.
@@ -104,13 +117,21 @@ def merge_maps(maps: Iterable[str], output: str):
     ngram_map = defaultdict(list)
     offset = 0
     ngram_map["metadata"] = {}
-    for map_path in maps:
+    for map_path in tqdm(maps, desc="Merging maps"):
         with open(map_path, "r") as f:
             map_data = json_load(f)
 
             for k, v in map_data.items():
                 if k != "metadata":
-                    ngram_map[k].extend([i + offset for i in v])
+                    new_indices = []
+                    for i in v:
+                        if isinstance(i, str):
+                            sample, version_i, versions_num = parse_version_offset(i)
+                            new_indices.append(f"{sample + offset}_{version_i}/{versions_num}")
+                        else:
+                            new_indices.append(i + offset)
+
+                    ngram_map[k].extend(new_indices)
 
             map_data["metadata"]["start_offset"] = offset
             offset += map_data["metadata"]["samples"]
@@ -408,9 +429,9 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_ind
             for proc_bytes, current_contaminated_indices, current_contaminated_ngrams, contamination_source in pool.imap_unordered(read_dataset(), 100):
                 for i in current_contaminated_indices:
                     if isinstance(i, str):
-                        i_part, version = i.split("_")
-                        version_i, versions_num = map(int, version.split("/"))
-                        contaminated_indices_multi_version[(int(i_part), versions_num)].add(version_i)
+
+                        i_part, version_i, versions_num = parse_version_offset(i)
+                        contaminated_indices_multi_version[(i_part, versions_num)].add(version_i)
                     else:
                         contaminated_indices.add(i)
 
@@ -466,9 +487,14 @@ def indices_2_dataset_indices(indices: str, ngram_map: str, output: str):
         while i >= ngram_map["metadata"][dataset_names[current_dataset]]["end_offset"] and current_dataset < len(dataset_names):
             current_dataset += 1
 
-        dataset_indices[dataset_names[current_dataset]].append(
-            i - ngram_map["metadata"][dataset_names[current_dataset]]["start_offset"]
-        )
+        if isinstance(i, str):
+            i, version_i, versions_num = parse_version_offset(i)
+            i -= ngram_map["metadata"][dataset_names[current_dataset]]["start_offset"]
+            dataset_indices[dataset_names[current_dataset]].append(f"{i}_{version_i}/{versions_num}")
+        else:
+            dataset_indices[dataset_names[current_dataset]].append(
+                i - ngram_map["metadata"][dataset_names[current_dataset]]["start_offset"]
+            )
 
     with open(output, "w") as f:
         json_dump(dataset_indices, f)
