@@ -319,7 +319,7 @@ class SearchContaminatedWorker(FunctorWorker):
     Parallel worker for searching contaminated samples.
     """
     def __init__(self, forbidden_ngrams: dict[str, list[int]], ngram_sizes: list[int], field: str,
-                 sub_chars: Iterable[str], field_id: str = "id"):
+                 sub_chars: Iterable[str], field_id: Optional[str] = "id"):
         """
         :param forbidden_ngrams:
             key - ngram
@@ -329,6 +329,7 @@ class SearchContaminatedWorker(FunctorWorker):
         :param field: content field
         :param sub_chars: String of all characters that are supposed to be translated to whitespace. By default, we remove punctuation.
         :param field_id: field with unique identifier
+            If None then the line number will be used as the identifier.
         """
         super().__init__()
         self.forbidden_ngrams = forbidden_ngrams
@@ -338,12 +339,13 @@ class SearchContaminatedWorker(FunctorWorker):
         self.sub_chars = set(sub_chars)
         self.sub_chars = [str.maketrans(sub_chars, " " * len(sub_chars)) for sub_chars in self.sub_chars]
 
-    def __call__(self, proc: tuple[int, str]) -> Tuple[int, list[int], list[str], Union[str, int]]:
+    def __call__(self, proc: tuple[int, int, str]) -> Tuple[int, list[int], list[str], Union[str, int]]:
         """
         Decontaminates the record on line_offset.
 
         :param proc:
             - number of read bytes
+            - line number
             - line
         :return:
             - number of read bytes
@@ -353,7 +355,8 @@ class SearchContaminatedWorker(FunctorWorker):
         """
 
         proc_bytes = proc[0]
-        line = json_loads(proc[1])
+        line_number = proc[1]
+        line = json_loads(proc[2])
         content = line[self.field]
 
         contaminated_indices = set()
@@ -372,11 +375,11 @@ class SearchContaminatedWorker(FunctorWorker):
                         contaminated_indices.update(self.forbidden_ngrams[str_ng])
                         contaminated_ngrams.add(str_ng)
 
-        return proc_bytes, list(contaminated_indices), list(contaminated_ngrams), line[self.field_id]
+        return proc_bytes, list(contaminated_indices), list(contaminated_ngrams), line_number if self.field_id is None else line[self.field_id]
 
 
 def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_indices_path: str, contaminated_ngrams_path: str,
-                        field: str, field_id: str = "id", ignore_above: int = math.inf, workers: int = -1):
+                        field: str, field_id: Optional[str] = "id", ignore_above: int = math.inf, workers: int = -1):
     """
     Decontaminates the dataset.
 
@@ -386,6 +389,7 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_ind
     :param contaminated_ngrams_path: Path where the contaminated ngrams will be stored.
     :param field: content field
     :param field_id: field with unique identifier
+        if None then the line number will be used as the identifier.
     :param ignore_above: Ignore n-grams that are more frequent than this value.
     :param workers: Number of parallel workers. If -1 then it will use all available CPUs.
     """
@@ -418,9 +422,11 @@ def search_contaminated(dataset_path: str, ngram_map_file: str, contaminated_ind
 
         def read_dataset():
             line_offset = 0
+            line_cnt = 0
             while cur_line := dataset.readline():
-                yield dataset.tell() - line_offset, cur_line
+                yield dataset.tell() - line_offset, line_cnt, cur_line
                 line_offset = dataset.tell()
+                line_cnt += 1
 
         contaminated_indices = set()
         contaminated_indices_multi_version = defaultdict(set)   # we need to cover all version to mark index as contaminated
@@ -642,7 +648,7 @@ def main():
     search_contaminated_parser.add_argument("contaminated_indices", help="Path where the contaminated sample indices will be stored. The indice is considered contaiminated when associated ngram to indice occurs in the input dataset.")
     search_contaminated_parser.add_argument("contaminated_ngrams", help="Path where the contaminated ngrams will be stored.")
     search_contaminated_parser.add_argument("--field", help="content field")
-    search_contaminated_parser.add_argument("--field_id", help="field with unique identifier", default="id")
+    search_contaminated_parser.add_argument("--field_id", help="field with unique identifier", default=None)
     search_contaminated_parser.add_argument("--ignore_above", help="Ignore n-grams that are more frequent than this value.", type=int, default=None)
     search_contaminated_parser.add_argument("--workers", help="Number of parallel workers. If -1 then it will use all available CPUs.", type=int, default=-1)
     search_contaminated_parser.set_defaults(func=search_contaminated_entry_point)
