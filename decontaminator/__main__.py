@@ -536,6 +536,10 @@ def contaminated_ngrams_per_dataset(ngrams_path: str, ngram_map: str, output: st
         indices = ngram_map[ngram]
 
         for i in indices:
+            if isinstance(i, str):
+                # we are interested just in sample index
+                i, _, _ = parse_version_offset(i)
+
             dataset = interval_2_dataset[i]
             res[dataset][ngram]["indices"].append(i-ngram_map["metadata"][dataset]["start_offset"])
             res[dataset][ngram]["sources"] = contamination_sources
